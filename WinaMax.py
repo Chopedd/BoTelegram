@@ -114,6 +114,7 @@ def limpiar_nombre_equipo(nombre):
         try: driver.execute_script(s)
         except: continue
 def extraer_rapido(loc, vis):
+    part = [] # Lista para almacenar el enlace del evento
     options = webdriver.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--headless=new") # Descomenta si no quieres ver el navegador
@@ -139,6 +140,8 @@ def extraer_rapido(loc, vis):
         if not enlaces: 
             print(f"❌ Evento '{loc}' no encontrado en Winamax.")
             return None
+        else:
+            part.append(enlaces[0].get_attribute("href"))
             
         driver.get(enlaces[0].get_attribute("href"))
         time.sleep(1)

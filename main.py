@@ -125,14 +125,55 @@ if __name__ == "__main__":
                 
                 if not locales:
                     Telegram.editar_progreso(chat_id, mensajebase, "❌ No se encontraron partidos.")
+                    
+
                 else:
                     db_partidos = [{"txt": f"{l} vs {v}", "iso": h if h else "9999"} for l, v, h in zip(locales, visitantes, horas)]
                     db_partidos.sort(key=lambda x: x['iso'])
                     pool = db_partidos[:10] if config_usuario["solo_proximos"] else db_partidos[:40]
 
-                    prompt_sel = f"[TASK: SELECT_5]\nDATA: {', '.join([p['txt'] for p in pool[:25]])}"
-                    res_sel = enviar_a_llama(prompt_sel, "DATA_EXTRACTOR")
+                    # Definimos un System Prompt potente
+                    n_picks = 5 
+
+                    SYSTEM_SELECTOR = f"""You are a Professional Football Match Selector. 
+                    Your goal is to extract exactly {n_picks} matches from the provided list.
+
+                    PRIORITY HIERARCHY:
+                    1. MANDATORY: Top Tier teams (e.g., Real Madrid, Barca, Man City, Bayern, PSG, Liverpool, Arsenal, Inter).
+                    2. HIGH PRIORITY: Major European Leagues (LaLiga, Premier League, Serie A, Bundesliga, Ligue 1).
+                    3. SECONDARY: Other professional first-division leagues.
+
+                    STRICT REQUIREMENT: You MUST return exactly {n_picks} matches. 
+                    If there are not enough 'Top Tier' matches, you MUST fill the remaining slots with the next best available matches from the list until the count reaches {n_picks}."""
                     
+                    nombres_disponibles = ", ".join([p['txt'] for p in pool])
+                    part = len(nombres_disponibles)
+
+                    # 2. Ajustamos n_picks dinámicamente (Máximo 5, o el total si hay menos)
+                    n_picks_real = min(5, part)
+
+                    # 3. Creamos la lista para el prompt
+                    lista_partidos = ", ".join(nombres_disponibles)
+                    
+                    prompt_sel = f"""
+                    [TASK]
+                    Select the best {n_picks} matches for betting analysis from the following list.
+
+                    [INPUT DATA]
+                    {lista_partidos}
+
+                    [INSTRUCTIONS]
+                    - Provide EXACTLY {n_picks} lines.
+                    - Format: Home Team vs Away Team (one per line).
+                    - DO NOT include numbering, dates, or extra text.
+                    - If the list is shorter than {n_picks}, return all available matches.
+                    - If the list is longer, apply the Priority Hierarchy.
+
+                    [FINAL SELECTION]:"""
+
+                    # Llamada actualizada
+                    res_sel = enviar_a_llama(prompt_sel, system_msg=SYSTEM_SELECTOR)
+                                        
                     candidatos = []
                     for linea in res_sel.split('\n'):
                         if " vs " in linea.lower():
@@ -207,8 +248,9 @@ if __name__ == "__main__":
 
                             # --- 3. CÁLCULO DE CONFIANZA FINAL (MIX AL 50/50) ---
                             # Promediamos su fuerza específica (casa/fuera) con su racha actual (últimos 5)
-                            fuerza_l = (efi_casa_l + racha_global_l) / 2
-                            fuerza_v = (efi_fuera_v + racha_global_v) / 2
+                            # --- 3. CÁLCULO DE CONFIANZA FINAL (MODELO 40/60) ---
+                            fuerza_l = (efi_casa_l * 0.40) + (racha_global_l * 0.60)
+                            fuerza_v = (efi_fuera_v * 0.40) + (racha_global_v * 0.60)
 
                             total_fuerza = fuerza_l + fuerza_v
                             if total_fuerza > 0:
@@ -217,14 +259,26 @@ if __name__ == "__main__":
                             else:
                                 conf_l_final, conf_v_final = 51, 49
 
-                            # --- 4. REPORTE PARA LA IA ---
+                            # --- NUEVO: DETECCIÓN DE VALOR ---
+                            try:
+                                cuota_local = float(cuotas['1x2'][0])
+                                prob_mercado = (1 / cuota_local) * 100
+                                # Si nuestra confianza es mayor que la probabilidad del mercado, hay VALOR
+                                diferencial = conf_l_final - prob_mercado
+                                etiqueta_valor = "💎 VALOR DETECTADO" if diferencial > 5 else "⚠️ RIESGO ALTO"
+                            except:
+                                etiqueta_valor = "📊 ESPERANDO CUOTAS"
+
+                            # --- 4. REPORTE PARA TELEGRAM ---
                             reporte_base += (
-                                f"✅ PARTIDO: {partido}\n"
-                                f"   🏠 LOCAL: Casa {efi_casa_l}% | Racha Gral {racha_global_l}%\n"
-                                f"   🚀 VISITANTE: Fuera {efi_fuera_v}% | Racha Gral {racha_global_v}%\n"
-                                f"   🔥 CONFIANZA TOTAL: {local} {conf_l_final}% | {visitante} {conf_v_final}%\n"
-                                f"   💰 CUOTAS 1X2: 1: {cuotas['1x2'][0]} | X: {cuotas['1x2'][1]} | 2: {cuotas['1x2'][2]}\n"
-                                f"-------------------------------\n")
+                                f"🏆 <b>REPORTE FINAL IA: {local} vs {visitante}</b>\n"
+                                f"🎯 <b>PRONÓSTICO:</b> Victoria {local if conf_l_final > conf_v_final else visitante}\n"
+                                f"📈 <b>CONFIANZA:</b> {local} {conf_l_final}% | {visitante} {conf_v_final}%\n"
+                                f"💰 <b>CUOTAS 1X2:</b> 1: {cuotas['1x2'][0]} | X: {cuotas['1x2'][1]} | 2: {cuotas['1x2'][2]}\n"
+                                f"---\n"
+                                f"[{etiqueta_valor}]\n"
+                                f"🔥 Puntos de ventaja sobre el mercado: {round(diferencial, 1)}%"
+                            )
                         
                         estados[i] = 1
                         time.sleep(0.2)
@@ -232,28 +286,35 @@ if __name__ == "__main__":
                     Telegram.editar_progreso(chat_id, mensajebase, "✅ <b>¡Procesado!</b>\nGenerando reporte final...")
                     
                     prompt_final = f"""
-    [TASK: ANALISTA_ESTRATÉGICO_FÚTBOL]
+    [TASK: STRATEGIC_FOOTBALL_ANALYST]
+    
     DATA_INPUT:
     {reporte_base}
 
     INSTRUCTIONS:
-    1. Revisa la 'CONFIANZA TOTAL' generada por el cálculo (Casa/Fuera + Racha).
-    2. APLICA ESTA LÓGICA DE SELECCIÓN:
-    - CONFIANZA > 80%: "VICTORIA SIMPLE" (Es un favorito absoluto en racha).
-    - CONFIANZA 65% - 80%: "VICTORIA SIMPLE" (Si la cuota es > 2.00) o "DOBLE OPORTUNIDAD" (Si buscas asegurar).
-    - CONFIANZA 50% - 64%: "DOBLE OPORTUNIDAD" (Partido igualado, proteger con empate).
-    - CONFIANZA < 50%: "RIESGO ALTO / NO APOSTAR".
+    1. ANALYZE the 'TOTAL CONFIDENCE' generated by the calculation (Home/Away efficiency + Recent Form).
+    
+    2. SELECTION LOGIC:
+    - CONFIDENCE > 80%: Output "HOME/AWAY WIN" (Absolute favorite in top form).
+    - CONFIDENCE 65% - 80%: 
+        * If Odds > 2.00: Output "VALUE WIN" (High return potential).
+        * If Odds < 2.00: Output "HOME/AWAY WIN" or "DOUBLE CHANCE" to secure.
+    - CONFIDENCE 50% - 64%: Output "DOUBLE CHANCE (1X / X2)" (Balanced match, cover the draw).
+    - CONFIDENCE < 50%: Output "HIGH RISK / NO BET".
 
-    3. ETIQUETAS ESPECIALES:
-    - Si 'Racha Gral' es 100% en el favorito, añade el emoji 🔥.
-    - Si la 'Cuota Sugerida' es > 2.00 y la Confianza es > 80%, añade [💎 VALOR DETECTADO].
+    3. SPECIAL TAGS:
+    - If 'Racha Gral' (Global Streak) is 100% for the favorite, add the 🔥 emoji.
+    - If Odds > 2.00 AND Confidence > 80%, add [💎 VALUE DETECTED].
+    
+    4. STRICT RULE: No explanations, no greetings, no extra text. ONLY the exact format below.
 
-    FORMATO:
+    OUTPUT FORMAT:
     ✅ **[LOCAL] vs [VISITANTE]**
-    🎯 **PRONÓSTICO:** [Resultado]
-    📈 **CONFIANZA:** [Valor L]% (Local) | [Valor V]% (Visitante)
-    💰 **CUOTA SUGERIDA:** [Valor de la cuota]
+    🎯 **PREDICTION:** [Calculated Result]
+    📈 **CONFIDENCE:** [Value L]% (Home) | [Value V]% (Away)
+    💰 **SUGGESTED ODDS:** [1x2 Odds Value]
     ---
+    [Include Special Tags here if applicable]
     """
                     informe_final = enviar_a_llama(prompt_final, "TIPSTER_PROFESIONAL")
                     Telegram.editar_mensaje_botones(
